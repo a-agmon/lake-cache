@@ -5,9 +5,8 @@ use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 struct CacheItem {
-    key: String,
     value: Bytes,
-    expires_at: usize,
+    expiration_time_millis: u128,
 }
 
 struct CacheData {
@@ -43,7 +42,7 @@ impl LRUCache2 {
         CACHE_DATA.with(|data| {
             let mut data = data.borrow_mut();
             if let Some(item) = data.cache.get(key).cloned() {
-                if item.expires_at > current_time_millis() {
+                if item.expiration_time_millis > current_time_millis() {
                     Self::push_item_to_front(&mut data, key);
                     Some(item.value)
                 } else {
@@ -60,9 +59,8 @@ impl LRUCache2 {
         CACHE_DATA.with(|data| {
             let mut data = data.borrow_mut();
             let item = CacheItem {
-                key: key.to_string(),
                 value,
-                expires_at: current_time_millis() + data.ttl_seconds * 1000,
+                expiration_time_millis: current_time_millis() + (data.ttl_seconds * 1000) as u128,
             };
             data.cache.insert(key.to_string(), item);
             Self::push_item_to_front(&mut data, key);
@@ -96,11 +94,11 @@ impl LRUCache2 {
     }
 }
 
-fn current_time_millis() -> usize {
+fn current_time_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Time went backwards")
-        .as_millis() as usize
+        .as_millis()
 }
 
 #[cfg(test)]
