@@ -2,13 +2,14 @@ use bytes::Bytes;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 thread_local! {
     static CACHE: RefCell<LRUCache> = RefCell::new(LRUCache::new(1, 0));
 }
 pub struct LocalCache;
 
 impl LocalCache {
+
     pub fn new(capacity: usize, ttl: u64) -> Self {
         CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -25,20 +26,20 @@ impl LocalCache {
     }
 }
 
-struct Node {
+struct CacheItem {
     key: String,
     value: Bytes,
     expires_at: u64,
-    prev: Option<Weak<RefCell<Node>>>,
-    next: Option<Rc<RefCell<Node>>>,
+    prev: Option<Weak<RefCell<CacheItem>>>,
+    next: Option<Rc<RefCell<CacheItem>>>,
 }
 
 struct LRUCache {
     capacity: usize,
     ttl_seconds: u64,
-    map: HashMap<String, Rc<RefCell<Node>>>,
-    head: Option<Rc<RefCell<Node>>>,
-    tail: Option<Rc<RefCell<Node>>>,
+    map: HashMap<String, Rc<RefCell<CacheItem>>>,
+    head: Option<Rc<RefCell<CacheItem>>>,
+    tail: Option<Rc<RefCell<CacheItem>>>,
 }
 
 impl LRUCache {
@@ -96,13 +97,13 @@ impl LRUCache {
     }
 
     /// Moves the given node to the front of the list.
-    fn move_to_head(&mut self, node: Rc<RefCell<Node>>) {
+    fn move_to_head(&mut self, node: Rc<RefCell<CacheItem>>) {
         self.remove_node(Rc::clone(&node));
         self.add_to_head(node);
     }
 
     /// Removes the given node from the list.
-    fn remove_node(&mut self, node: Rc<RefCell<Node>>) {
+    fn remove_node(&mut self, node: Rc<RefCell<CacheItem>>) {
         let prev_weak = node.borrow_mut().prev.take();
         let next_opt = node.borrow_mut().next.take();
 
@@ -129,7 +130,7 @@ impl LRUCache {
     }
 
     /// Adds the given node to the front of the list.
-    fn add_to_head(&mut self, node: Rc<RefCell<Node>>) {
+    fn add_to_head(&mut self, node: Rc<RefCell<CacheItem>>) {
         node.borrow_mut().prev = None;
         node.borrow_mut().next = self.head.clone();
 
@@ -149,8 +150,8 @@ impl LRUCache {
             .unwrap()
             .as_secs()
     }
-    fn create_node(&self, key: String, value: Bytes) -> Rc<RefCell<Node>> {
-        Rc::new(RefCell::new(Node {
+    fn create_node(&self, key: String, value: Bytes) -> Rc<RefCell<CacheItem>> {
+        Rc::new(RefCell::new(CacheItem {
             key: key.clone(),
             value: value.clone(),
             expires_at: self.now_seconds() + self.ttl_seconds,
