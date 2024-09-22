@@ -8,13 +8,13 @@ use axum::{
     Router,
 };
 use store::s3_store::S3Store;
-use store::{cache2::LRUCache2, s3_store::StoreError};
+use store::{cache::LocalCache, s3_store::StoreError};
 use tracing::info;
 mod store;
 
 struct AppState {
     store: S3Store,
-    cache: LRUCache2,
+    cache: LocalCache,
 }
 
 #[tokio::main]
@@ -22,7 +22,7 @@ async fn main() {
     tracing_subscriber::fmt().with_ansi(true).init();
     info!("Starting server");
     let store = S3Store::new("somebucket", "phi3").await;
-    let cache = LRUCache2::new(1000, 1000);
+    let cache = LocalCache::new(1000, 60);
     let app_state = Arc::new(AppState { store, cache });
     let app = Router::new()
         .route("/keys/:key", get(get_key))
@@ -37,7 +37,7 @@ async fn get_key(
     State(app): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Bytes, StatusCode> {
-    if let Some(content) = app.cache.get(&key) {
+    if let Some(content) = app.cache.get_item(&key) {
         return Ok(content);
     }
     let res = app.store.get(&key).await;
@@ -51,7 +51,7 @@ async fn get_key(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
         Ok(content) => {
-            app.cache.set(&key, content.clone());
+            app.cache.add_item(key, content.clone());
             Ok(content)
         }
     }

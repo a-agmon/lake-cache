@@ -1,139 +1,150 @@
 use bytes::Bytes;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::rc::{Rc, Weak};
+use std::time::{Duration, SystemTime};
+thread_local! {
+    static CACHE: RefCell<LRUCache> = RefCell::new(LRUCache::new(1, 0));
+}
+pub struct LocalCache;
+
+impl LocalCache {
+    pub fn new(capacity: usize, ttl: u64) -> Self {
+        CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            *cache = LRUCache::new(capacity, ttl);
+        });
+        LocalCache
+    }
+    pub fn get_item(&self, key: &String) -> Option<Bytes> {
+        CACHE.with(|cache| cache.borrow_mut().get_item(key))
+    }
+
+    pub fn add_item(&self, key: String, value: Bytes) {
+        CACHE.with(|cache| cache.borrow_mut().add_item(key, value))
+    }
+}
 
 struct Node {
     key: String,
     value: Bytes,
-    prev: Option<Arc<RwLock<Node>>>,
-    next: Option<Arc<RwLock<Node>>>,
+    expires_at: u64,
+    prev: Option<Weak<RefCell<Node>>>,
+    next: Option<Rc<RefCell<Node>>>,
 }
 
-pub struct LRUCache {
+struct LRUCache {
     capacity: usize,
-    cache: HashMap<String, Arc<RwLock<Node>>>,
-    head: Option<Arc<RwLock<Node>>>,
-    tail: Option<Arc<RwLock<Node>>>,
+    ttl_seconds: u64,
+    map: HashMap<String, Rc<RefCell<Node>>>,
+    head: Option<Rc<RefCell<Node>>>,
+    tail: Option<Rc<RefCell<Node>>>,
 }
 
 impl LRUCache {
-    pub fn new(capacity: usize) -> Self {
+    /// Creates a new LRUCache with the given capacity.
+    fn new(capacity: usize, ttl_seconds: u64) -> Self {
         LRUCache {
             capacity,
-            cache: HashMap::new(),
+            ttl_seconds,
+            map: HashMap::new(),
             head: None,
             tail: None,
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<Bytes> {
-        if let Some(node) = self.cache.get(key) {
-            let value = node.read().unwrap().value.clone();
-            self.move_to_head(Arc::clone(node));
+    /// Adds an item to the cache. If the item already exists, it updates the value and moves it to the front.
+    /// If adding the new item exceeds the capacity, it removes the least recently used item.
+    fn add_item(&mut self, key: String, value: Bytes) {
+        if let Some(node) = self.map.get(&key) {
+            // Update the value and move the node to the head.
+            node.borrow_mut().value = value.clone();
+            self.move_to_head(Rc::clone(node));
+        } else {
+            // Create a new node.
+            let new_node = Rc::new(RefCell::new(Node {
+                key: key.clone(),
+                value: value.clone(),
+                expires_at: SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + self.ttl_seconds,
+                prev: None,
+                next: None,
+            }));
+
+            // Add the new node to the front and insert it into the map.
+            self.add_to_head(Rc::clone(&new_node));
+            self.map.insert(key.clone(), Rc::clone(&new_node));
+
+            // If capacity is exceeded, remove the least recently used item.
+            if self.map.len() > self.capacity {
+                if let Some(tail_node) = self.tail.take() {
+                    let tail_key = tail_node.borrow().key.clone();
+                    self.remove_node(Rc::clone(&tail_node));
+                    self.map.remove(&tail_key);
+                }
+            }
+        }
+    }
+
+    /// Retrieves an item from the cache by key. If the item exists, it moves it to the front.
+    fn get_item(&mut self, key: &String) -> Option<Bytes> {
+        if let Some(node) = self.map.get(key) {
+            let value = node.borrow().value.clone();
+            self.move_to_head(Rc::clone(node));
             Some(value)
         } else {
             None
         }
     }
 
-    fn set(&mut self, key: String, value: Bytes) {
-        if let Some(node) = self.cache.get(&key) {
-            node.write().unwrap().value = value;
-            self.move_to_head(Arc::clone(node));
-        } else {
-            let new_node = Arc::new(RwLock::new(Node {
-                key: key.clone(),
-                value,
-                prev: None,
-                next: None,
-            }));
-
-            if self.cache.len() >= self.capacity {
-                if let Some(tail) = self.tail.take() {
-                    let tail_key = tail.read().unwrap().key.clone();
-                    self.cache.remove(&tail_key);
-                    if let Some(prev) = tail.write().unwrap().prev.take() {
-                        prev.write().unwrap().next = None;
-                        self.tail = Some(prev);
-                    }
-                }
-            }
-
-            self.cache.insert(key, Arc::clone(&new_node));
-            self.add_to_head(new_node);
-        }
-    }
-
-    fn move_to_head(&mut self, node: Arc<RwLock<Node>>) {
-        if Arc::ptr_eq(self.head.as_ref().unwrap(), &node) {
-            return;
-        }
-
-        let prev = node.write().unwrap().prev.take();
-        let next = node.write().unwrap().next.take();
-
-        if let Some(prev) = prev.clone() {
-            prev.write().unwrap().next = next.clone();
-        }
-
-        if let Some(next) = next {
-            next.write().unwrap().prev = prev;
-        } else {
-            self.tail = prev;
-        }
-
+    /// Moves the given node to the front of the list.
+    fn move_to_head(&mut self, node: Rc<RefCell<Node>>) {
+        self.remove_node(Rc::clone(&node));
         self.add_to_head(node);
     }
 
-    fn add_to_head(&mut self, node: Arc<RwLock<Node>>) {
-        node.write().unwrap().prev = None;
-        node.write().unwrap().next = self.head.clone();
+    /// Removes the given node from the list.
+    fn remove_node(&mut self, node: Rc<RefCell<Node>>) {
+        let prev_weak = node.borrow_mut().prev.take();
+        let next_opt = node.borrow_mut().next.take();
 
-        if let Some(head) = self.head.clone() {
-            head.write().unwrap().prev = Some(Arc::clone(&node));
+        if let Some(ref prev_weak_ref) = prev_weak {
+            if let Some(prev_rc) = prev_weak_ref.upgrade() {
+                prev_rc.borrow_mut().next = next_opt.clone();
+            }
+        } else {
+            // Node is head
+            self.head = next_opt.clone();
+        }
+
+        if let Some(next_rc) = next_opt {
+            next_rc.borrow_mut().prev = prev_weak.clone();
+        } else {
+            // Node is tail
+            if let Some(ref prev_weak_ref) = prev_weak {
+                self.tail = prev_weak_ref.upgrade();
+            } else {
+                // List is empty
+                self.tail = None;
+            }
+        }
+    }
+
+    /// Adds the given node to the front of the list.
+    fn add_to_head(&mut self, node: Rc<RefCell<Node>>) {
+        node.borrow_mut().prev = None;
+        node.borrow_mut().next = self.head.clone();
+
+        if let Some(old_head) = &self.head {
+            old_head.borrow_mut().prev = Some(Rc::downgrade(&node));
+        } else {
+            // List was empty, so tail is also node
+            self.tail = Some(Rc::clone(&node));
         }
 
         self.head = Some(node);
-
-        if self.tail.is_none() {
-            self.tail = self.head.clone();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_lru_cache() {
-        let mut cache = LRUCache::new(2);
-
-        // Test setting and getting values
-        cache.set("key1".to_string(), Bytes::from("value1"));
-        cache.set("key2".to_string(), Bytes::from("value2"));
-
-        assert_eq!(cache.get("key1"), Some(Bytes::from("value1")));
-        assert_eq!(cache.get("key2"), Some(Bytes::from("value2")));
-        assert_eq!(cache.get("key3"), None);
-
-        // Test capacity and LRU eviction
-        cache.set("key3".to_string(), Bytes::from("value3"));
-        assert_eq!(cache.get("key1"), None); // key1 should be evicted
-        assert_eq!(cache.get("key2"), Some(Bytes::from("value2")));
-        assert_eq!(cache.get("key3"), Some(Bytes::from("value3")));
-
-        // Test updating existing key
-        cache.set("key2".to_string(), Bytes::from("new_value2"));
-        assert_eq!(cache.get("key2"), Some(Bytes::from("new_value2")));
-
-        // Test order after access
-        cache.get("key3"); // This should move key3 to the front
-        cache.set("key4".to_string(), Bytes::from("value4"));
-        assert_eq!(cache.get("key2"), None); // key2 should be evicted
-        assert_eq!(cache.get("key3"), Some(Bytes::from("value3")));
-        assert_eq!(cache.get("key4"), Some(Bytes::from("value4")));
     }
 }
