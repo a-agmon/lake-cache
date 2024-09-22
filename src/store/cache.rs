@@ -62,18 +62,7 @@ impl LRUCache {
             self.move_to_head(Rc::clone(node));
         } else {
             // Create a new node.
-            let new_node = Rc::new(RefCell::new(Node {
-                key: key.clone(),
-                value: value.clone(),
-                expires_at: SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + self.ttl_seconds,
-                prev: None,
-                next: None,
-            }));
-
+            let new_node = self.create_node(key.clone(), value);
             // Add the new node to the front and insert it into the map.
             self.add_to_head(Rc::clone(&new_node));
             self.map.insert(key.clone(), Rc::clone(&new_node));
@@ -91,12 +80,18 @@ impl LRUCache {
 
     /// Retrieves an item from the cache by key. If the item exists, it moves it to the front.
     fn get_item(&mut self, key: &String) -> Option<Bytes> {
-        if let Some(node) = self.map.get(key) {
-            let value = node.borrow().value.clone();
-            self.move_to_head(Rc::clone(node));
-            Some(value)
-        } else {
-            None
+        match self.map.get(key) {
+            Some(node) if self.now_seconds() > node.borrow().expires_at => {
+                self.remove_node(Rc::clone(node));
+                self.map.remove(key);
+                None
+            }
+            Some(node) => {
+                let value = node.borrow().value.clone();
+                self.move_to_head(Rc::clone(node));
+                Some(value)
+            }
+            None => None,
         }
     }
 
@@ -146,5 +141,114 @@ impl LRUCache {
         }
 
         self.head = Some(node);
+    }
+
+    fn now_seconds(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+    fn create_node(&self, key: String, value: Bytes) -> Rc<RefCell<Node>> {
+        Rc::new(RefCell::new(Node {
+            key: key.clone(),
+            value: value.clone(),
+            expires_at: self.now_seconds() + self.ttl_seconds,
+            prev: None,
+            next: None,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn test_capacity_based_eviction() {
+        let cache = LocalCache::new(3, 60);
+
+        cache.add_item("key1".to_string(), Bytes::from("value1"));
+        cache.add_item("key2".to_string(), Bytes::from("value2"));
+        cache.add_item("key3".to_string(), Bytes::from("value3"));
+
+        assert_eq!(
+            cache.get_item(&"key1".to_string()),
+            Some(Bytes::from("value1"))
+        );
+        assert_eq!(
+            cache.get_item(&"key2".to_string()),
+            Some(Bytes::from("value2"))
+        );
+        assert_eq!(
+            cache.get_item(&"key3".to_string()),
+            Some(Bytes::from("value3"))
+        );
+
+        // Adding a fourth item should evict the least recently used item (key1)
+        cache.add_item("key4".to_string(), Bytes::from("value4"));
+
+        assert_eq!(cache.get_item(&"key1".to_string()), None);
+        assert_eq!(
+            cache.get_item(&"key2".to_string()),
+            Some(Bytes::from("value2"))
+        );
+        assert_eq!(
+            cache.get_item(&"key3".to_string()),
+            Some(Bytes::from("value3"))
+        );
+        assert_eq!(
+            cache.get_item(&"key4".to_string()),
+            Some(Bytes::from("value4"))
+        );
+    }
+
+    #[test]
+    fn test_get_item_updates_order() {
+        let cache = LocalCache::new(3, 60);
+
+        cache.add_item("key1".to_string(), Bytes::from("value1"));
+        cache.add_item("key2".to_string(), Bytes::from("value2"));
+        cache.add_item("key3".to_string(), Bytes::from("value3"));
+
+        // Access key1, making it the most recently used
+        cache.get_item(&"key1".to_string());
+
+        // Add a new item, which should evict the least recently used (now key2)
+        cache.add_item("key4".to_string(), Bytes::from("value4"));
+
+        assert_eq!(
+            cache.get_item(&"key1".to_string()),
+            Some(Bytes::from("value1"))
+        );
+        assert_eq!(cache.get_item(&"key2".to_string()), None);
+        assert_eq!(
+            cache.get_item(&"key3".to_string()),
+            Some(Bytes::from("value3"))
+        );
+        assert_eq!(
+            cache.get_item(&"key4".to_string()),
+            Some(Bytes::from("value4"))
+        );
+    }
+
+    #[test]
+    fn test_ttl_expiration() {
+        let cache = LocalCache::new(3, 2); // TTL of 2 seconds
+
+        cache.add_item("key1".to_string(), Bytes::from("value1"));
+
+        assert_eq!(
+            cache.get_item(&"key1".to_string()),
+            Some(Bytes::from("value1"))
+        );
+
+        // Wait for 3 seconds (longer than TTL)
+        sleep(Duration::from_secs(3));
+
+        // The item should now be expired
+        assert_eq!(cache.get_item(&"key1".to_string()), None);
     }
 }
