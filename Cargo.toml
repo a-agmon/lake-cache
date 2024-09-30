@@ -7,7 +7,7 @@ edition = "2021"
 tokio = { version = "1.40.0", features = [
     "full",
 ] }
-axum = "0.7.5"
+axum = "0.7.6"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = [
     "env-filter",
@@ -16,6 +16,8 @@ tracing-subscriber = { version = "0.3.18", features = [
     "json",
 ] }
 aws-config = "1.5.6"
-aws-sdk-s3 = "1.49.0"
+aws-sdk-s3 = "1.51.0"
 bytes = "1.7.1"
-thiserror = "1.0.63"
+thiserror = "1.0.64"
+local_lru = "0.2.5"
+serde = "1.0.210"
